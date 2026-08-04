@@ -1,0 +1,19 @@
+# Render Blueprint for the OCI monorepo (repo root = Desktop/oci).
+# Points the web service at ./backend so pip/uvicorn run in the right place.
+#
+# Connect this repo in Render → New → Blueprint → select this render.yaml
+
+services:
+  - type: web
+    name: oci-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: CORS_ORIGINS
+        value: "*"
