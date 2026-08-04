@@ -87,9 +87,9 @@ def health() -> Dict[str, str]:
     """Liveness probe.
 
     Returns:
-        ``{"status": "healthy"}`` when the process is up.
+        ``{"status": "healthy", "version": "1.0.0"}`` when the process is up.
     """
-    return {"status": "healthy"}
+    return {"status": "healthy", "version": "1.0.0"}
 
 
 @app.get("/schema")
