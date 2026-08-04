@@ -1,23 +1,10 @@
-# Render Blueprint for OCI Converge backend.
-# Use this file when the service Root Directory is `backend`
-# (or when this folder is the Git repository root).
-#
-# Docs: https://render.com/docs/blueprint-spec
-#
-# After deploy, set Vercel env VITE_API_URL to:
-#   https://oci-backend.onrender.com
-# then redeploy the frontend.
-
+name: oci-backend-blueprint
 services:
   - type: web
     name: oci-backend
     runtime: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11.0"
-      - key: CORS_ORIGINS
-        value: "*"
+        value: 3.11.0
