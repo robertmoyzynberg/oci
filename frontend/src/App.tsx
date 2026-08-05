@@ -1,13 +1,38 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import AssumptionControls from "./components/AssumptionControls";
+import CompareToggle from "./components/CompareToggle";
+import FeedbackButton from "./components/FeedbackButton";
+import LabelSetSelector, {
+  type LabelSet,
+} from "./components/LabelSetSelector";
 import MemeList from "./components/MemeList";
+import ModeIndicator, { type AppMode } from "./components/ModeIndicator";
+import OnboardingTooltip from "./components/OnboardingTooltip";
+import QuickStartButton from "./components/QuickStartButton";
+import ScenarioSelector from "./components/ScenarioSelector";
+import ShareChallengeButton from "./components/ShareChallengeButton";
 import SimulationCanvas from "./components/SimulationCanvas";
 import SystemStatus from "./components/SystemStatus";
 import TimeSlider from "./components/TimeSlider";
-import { defaultMap } from "./data/defaultMap";
+import Toast, { type ToastTone } from "./components/Toast";
+import {
+  cloneScenarioMap,
+  matchScenarioId,
+  type ScenarioId,
+} from "./data/scenarios";
+import { useLocalStorage } from "./hooks/useLocalStorage";
 import { runScenarioBranch } from "./services/api";
 import type { SystemMap } from "./types/oci-types";
+import {
+  computeBlackoutRisk,
+  memesWithDominance,
+  resolveGridDemand,
+} from "./utils/gridDemand";
+import {
+  encodeMap,
+  loadMapFromLocationHash,
+} from "./utils/urlEncoder";
 
 type Frame = Record<string, number>;
 
@@ -30,10 +55,18 @@ function applyOverridesToMap(
   };
 }
 
+function bootstrapState(): { map: SystemMap; scenario: ScenarioId } {
+  const fromHash = loadMapFromLocationHash();
+  if (fromHash) {
+    return { map: fromHash, scenario: matchScenarioId(fromHash) };
+  }
+  return { map: cloneScenarioMap("energy"), scenario: "energy" };
+}
+
 function errorMessage(err: unknown): string {
   if (axios.isAxiosError(err)) {
     if (err.code === "ECONNABORTED") {
-      return "Request timed out talking to the backend.";
+      return "Request timed out waking the backend. Please try again.";
     }
     if (!err.response) {
       return "Backend unreachable. Start it locally or check VITE_API_URL.";
@@ -47,8 +80,14 @@ function errorMessage(err: unknown): string {
 }
 
 export default function App() {
-  const [systemMap] = useState<SystemMap>(defaultMap);
+  const boot = useMemo(() => bootstrapState(), []);
+  const [systemMap, setSystemMap] = useState<SystemMap>(boot.map);
+  const [selectedScenario, setSelectedScenario] = useState<ScenarioId>(
+    boot.scenario,
+  );
+  const [compareMode, setCompareMode] = useState(false);
   const [simulationData, setSimulationData] = useState<Frame[] | null>(null);
+  const [baselineData, setBaselineData] = useState<Frame[] | null>(null);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [assumptionOverrides, setAssumptionOverrides] = useState<
     Record<string, number>
@@ -56,16 +95,48 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [toastTone, setToastTone] = useState<ToastTone>("error");
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [appMode, setAppMode] = useState<AppMode>("simulate");
+  const [labelSet, setLabelSet] = useLocalStorage<LabelSet>(
+    "oci-label-set-v1",
+    "full",
+  );
+  const hasAutoRun = useRef(false);
+  const skipNextAutoScenarioRun = useRef(true);
+
+  const shareableMap = useMemo(
+    () => applyOverridesToMap(systemMap, assumptionOverrides),
+    [systemMap, assumptionOverrides],
+  );
 
   const onOverrideChange = useCallback((key: string, value: number) => {
     setAssumptionOverrides((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const encoded = encodeMap(shareableMap);
+      const nextHash = `#${encoded}`;
+      if (window.location.hash === nextHash) return;
+      const url = `${window.location.pathname}${window.location.search}${nextHash}`;
+      window.history.replaceState(null, "", url);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [shareableMap]);
+
+  useEffect(() => {
     if (!toast) return;
-    const id = window.setTimeout(() => setToast(null), 6000);
+    const ms = toastTone === "success" || toastTone === "info" ? 3000 : 6000;
+    const id = window.setTimeout(() => setToast(null), ms);
     return () => window.clearTimeout(id);
-  }, [toast]);
+  }, [toast, toastTone]);
+
+  useEffect(() => {
+    if (!linkCopied) return;
+    const id = window.setTimeout(() => setLinkCopied(false), 2000);
+    return () => window.clearTimeout(id);
+  }, [linkCopied]);
 
   const currentFrame = useMemo(() => {
     if (!simulationData || simulationData.length === 0) {
@@ -86,45 +157,171 @@ export default function App() {
     return currentFrameIndex;
   }, [currentFrame, currentFrameIndex]);
 
-  const handleRun = async () => {
+  const gridDemand = useMemo(
+    () => resolveGridDemand(systemMap),
+    [systemMap],
+  );
+
+  const totalCapacity = useMemo(() => {
+    const fossil = currentFrame.fossil_capacity;
+    const renewable = currentFrame.renewable_capacity;
+    if (typeof fossil !== "number" || typeof renewable !== "number") {
+      return null;
+    }
+    return fossil + renewable;
+  }, [currentFrame]);
+
+  const blackoutRisk = useMemo(
+    () =>
+      computeBlackoutRisk(
+        currentFrame.fossil_capacity,
+        currentFrame.renewable_capacity,
+        gridDemand,
+      ),
+    [currentFrame, gridDemand],
+  );
+
+  const displayMemes = useMemo(
+    () => memesWithDominance(systemMap.memes ?? [], blackoutRisk),
+    [systemMap.memes, blackoutRisk],
+  );
+
+  const handleRun = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setToastTone("success");
+    setToast(
+      "Waking the simulation engine (first run can take up to a minute)…",
+    );
     try {
-      const mapForRun = applyOverridesToMap(systemMap, assumptionOverrides);
-      const response = await runScenarioBranch(mapForRun, [
-        { name: "active", overrides: assumptionOverrides },
-      ]);
-      const series =
-        response.branches.active ?? Object.values(response.branches)[0];
-      if (!series || series.length === 0) {
+      // Pass the base map so baseline branch uses registry defaults.
+      const branches = compareMode
+        ? [
+            { name: "baseline", overrides: {} },
+            { name: "custom", overrides: assumptionOverrides },
+          ]
+        : [{ name: "custom", overrides: assumptionOverrides }];
+
+      const response = await runScenarioBranch(systemMap, branches);
+      const custom =
+        response.branches.custom ?? Object.values(response.branches)[0];
+      if (!custom || custom.length === 0) {
         throw new Error("Simulation returned no frames.");
       }
-      setSimulationData(series);
+      setSimulationData(custom);
+      setBaselineData(
+        compareMode ? (response.branches.baseline ?? null) : null,
+      );
       setCurrentFrameIndex(0);
+      setToast(null);
     } catch (err) {
       const message = errorMessage(err);
       setError(message);
+      setToastTone("error");
       setToast(message);
     } finally {
       setLoading(false);
     }
+  }, [systemMap, assumptionOverrides, compareMode]);
+
+  // Auto-run once on first visit.
+  useEffect(() => {
+    if (hasAutoRun.current) return;
+    hasAutoRun.current = true;
+    void handleRun();
+  }, [handleRun]);
+
+  // Re-run when the user picks a new scenario template (not on every handleRun identity change).
+  useEffect(() => {
+    if (skipNextAutoScenarioRun.current) {
+      skipNextAutoScenarioRun.current = false;
+      return;
+    }
+    void handleRun();
+    // Intentionally only selectedScenario — avoid re-running on slider drags.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScenario]);
+
+  const handleScenarioChange = (id: ScenarioId) => {
+    setSelectedScenario(id);
+    setSystemMap(cloneScenarioMap(id));
+    setAssumptionOverrides({});
+    setSimulationData(null);
+    setBaselineData(null);
+    setCompareMode(false);
+    setCurrentFrameIndex(0);
+    setError(null);
   };
+
+  const handleQuickStart = () => {
+    setAppMode("simulate");
+    if (selectedScenario === "energy") {
+      // Already on the example — re-run so the graph animates immediately.
+      void handleRun();
+      return;
+    }
+    // Scenario-change effect auto-runs the simulation.
+    handleScenarioChange("energy");
+  };
+
+  const handleCompareChange = (checked: boolean) => {
+    setCompareMode(checked);
+    if (!checked) setBaselineData(null);
+  };
+
+  const buildShareUrl = useCallback(() => {
+    const encoded = encodeMap(shareableMap);
+    const nextHash = `#${encoded}`;
+    const url = `${window.location.origin}${window.location.pathname}${window.location.search}${nextHash}`;
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}${nextHash}`,
+    );
+    return url;
+  }, [shareableMap]);
+
+  const handleCopyLink = async () => {
+    try {
+      const url = buildShareUrl();
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      setToastTone("success");
+      setToast("Link copied!");
+    } catch {
+      setToastTone("error");
+      setToast("Could not copy link — copy the URL from the address bar.");
+    }
+  };
+
+  const timeUnit = systemMap.context.temporal?.unit ?? "years";
+  const hasRunSimulation = Boolean(simulationData && simulationData.length > 0);
 
   return (
     <div className="app-shell">
       {toast ? (
-        <div className="toast" role="alert">
-          <p>{toast}</p>
-          <button type="button" aria-label="Dismiss" onClick={() => setToast(null)}>
-            ×
-          </button>
-        </div>
+        <Toast
+          message={toast}
+          tone={toastTone}
+          onDismiss={() => setToast(null)}
+        />
       ) : null}
 
       <aside className="sidebar">
         <header className="brand">
           <h1>OCI Converge</h1>
-          <p>{systemMap.metadata.title}</p>
+          <p className="mission">
+            Stop arguing about who is right. Start seeing what is true.
+          </p>
+          <ScenarioSelector
+            value={selectedScenario}
+            onChange={handleScenarioChange}
+            disabled={loading}
+          />
+          <p className="scenario-title">{systemMap.metadata.title}</p>
+          {systemMap.context.narrative ? (
+            <p className="narrative">{systemMap.context.narrative}</p>
+          ) : null}
         </header>
 
         <AssumptionControls
@@ -133,38 +330,128 @@ export default function App() {
           onOverrideChange={onOverrideChange}
         />
 
-        <MemeList memes={systemMap.memes ?? []} />
+        <MemeList memes={displayMemes} />
 
         <SystemStatus stocks={systemMap.stocks} stockValues={currentFrame} />
 
         {error ? <p className="status-banner error">{error}</p> : null}
-        {loading ? <p className="status-banner info">Running simulation…</p> : null}
+        {loading ? (
+          <p className="status-banner info">Running simulation…</p>
+        ) : null}
 
-        <button
-          className="run-btn"
-          type="button"
-          onClick={handleRun}
-          disabled={loading}
-        >
-          {loading ? "Running…" : "Run Simulation"}
-        </button>
+        <div className="action-row">
+          <QuickStartButton
+            onClick={handleQuickStart}
+            disabled={loading}
+          />
+          <CompareToggle
+            checked={compareMode}
+            onChange={handleCompareChange}
+            disabled={loading}
+          />
+          <button
+            className="run-btn"
+            type="button"
+            onClick={() => void handleRun()}
+            disabled={loading}
+          >
+            {loading ? "Running…" : "Run Simulation"}
+          </button>
+          {hasRunSimulation ? (
+            <ShareChallengeButton
+              systemMap={shareableMap}
+              getShareUrl={buildShareUrl}
+              disabled={loading}
+              onCopied={() => {
+                setToastTone("success");
+                setToast(
+                  "Challenge copied to clipboard! Share it with your students.",
+                );
+              }}
+              onError={(message) => {
+                setToastTone("error");
+                setToast(message);
+              }}
+            />
+          ) : null}
+          <button
+            className="copy-link-btn"
+            type="button"
+            onClick={() => void handleCopyLink()}
+            title="Copy shareable simulation link"
+          >
+            {linkCopied ? "Link copied!" : "Copy Link"}
+          </button>
+        </div>
       </aside>
 
       <main className="main-stage">
-        <SimulationCanvas
-          stocks={systemMap.stocks}
-          flows={systemMap.flows}
-          memes={systemMap.memes ?? []}
-          simulationData={simulationData}
-          currentFrameIndex={currentFrameIndex}
-        />
-        <TimeSlider
-          max={Math.max(0, (simulationData?.length ?? 1) - 1)}
-          value={currentFrameIndex}
-          onChange={setCurrentFrameIndex}
-          yearLabel={yearLabel}
-        />
+        <div className="stage-toolbar">
+          <ModeIndicator mode={appMode} onChange={setAppMode} />
+          {appMode === "simulate" ? (
+            <LabelSetSelector value={labelSet} onChange={setLabelSet} />
+          ) : null}
+        </div>
+
+        <OnboardingTooltip />
+
+        {appMode === "build" ? (
+          <div className="build-mode-panel" role="status">
+            <h2>🛠️ Build Mode</h2>
+            <p>
+              Construct Mode — drag-to-connect stocks, flows, and memes — is
+              next. For now you are in a preview shell so the mode boundary is
+              clear.
+            </p>
+            <button
+              type="button"
+              className="onboarding-got-it"
+              onClick={() => setAppMode("simulate")}
+            >
+              Back to Simulation Mode
+            </button>
+          </div>
+        ) : (
+          <>
+            <SimulationCanvas
+              stocks={systemMap.stocks}
+              flows={systemMap.flows}
+              memes={displayMemes}
+              customData={simulationData}
+              baselineData={baselineData}
+              currentFrameIndex={currentFrameIndex}
+              loading={loading}
+              compareMode={compareMode}
+              labelSet={labelSet}
+              gridDemand={gridDemand}
+              totalCapacity={totalCapacity}
+              blackoutRisk={blackoutRisk}
+            />
+            <TimeSlider
+              max={Math.max(0, (simulationData?.length ?? 1) - 1)}
+              value={currentFrameIndex}
+              onChange={setCurrentFrameIndex}
+              yearLabel={yearLabel}
+            />
+            <p className="time-unit-hint" aria-hidden="true">
+              Time unit: {timeUnit}
+            </p>
+          </>
+        )}
       </main>
+
+      <FeedbackButton
+        systemMap={shareableMap}
+        assumptionOverrides={assumptionOverrides}
+        onSent={(mode) => {
+          setToastTone("success");
+          setToast(
+            mode === "clipboard"
+              ? `Copy this feedback and email us at rizim13@gmail.com.`
+              : "Feedback sent! Thank you.",
+          );
+        }}
+      />
     </div>
   );
 }

@@ -123,18 +123,22 @@ export const defaultMap: SystemMap = {
       name: "Green Future Pride",
       description:
         "A hopeful civic narrative that frames renewable adoption as regional identity and moral progress.",
-      emotional_charge: 0.75,
+      emotional_charge: 0.9,
       related_stocks: ["renewable_capacity"],
+      related_flows: ["build_renewables"],
       related_assumptions: ["tech_improvement", "build_base"],
+      influence: "+",
     },
     {
       id: "meme_grid_anxiety",
       name: "Blackout Anxiety",
       description:
-        "A fearful narrative that equates fossil retirement with unreliable power and winter blackouts.",
-      emotional_charge: -0.65,
-      related_stocks: ["fossil_capacity"],
+        "A fearful narrative that equates fossil retirement with unreliable power and winter blackouts. Grows when total capacity falls below grid demand.",
+      emotional_charge: -0.55,
+      related_stocks: ["fossil_capacity", "renewable_capacity"],
+      related_flows: ["retire_fossil", "build_renewables"],
       related_assumptions: ["retire_rate"],
+      influence: "-",
     },
   ],
   assumptions: {
@@ -166,6 +170,13 @@ export const defaultMap: SystemMap = {
         range: [0.0, 5.0],
         source: "Historical interconnection queue throughput",
         mutable: true,
+      },
+      grid_demand: {
+        value: 90,
+        confidence: 0.9,
+        range: [70, 120],
+        source: "Peak regional load + planning reserve (GW)",
+        mutable: false,
       },
     },
     scenario_branches: [
@@ -200,6 +211,7 @@ export const defaultMap: SystemMap = {
     extras: {
       background: "soft-topo",
       font: "Source Serif",
+      grid_demand: 90,
     },
   },
 };

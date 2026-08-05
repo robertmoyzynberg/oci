@@ -81,7 +81,10 @@ export interface Meme {
   description?: string;
   emotional_charge: number;
   related_stocks?: string[];
+  related_flows?: string[];
   related_assumptions?: string[];
+  /** Direction of narrative influence on related elements. */
+  influence?: "+" | "-" | "~";
 }
 
 export interface AssumptionParam {
