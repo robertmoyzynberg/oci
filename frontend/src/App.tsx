@@ -28,6 +28,7 @@ import {
   computeBlackoutRisk,
   memesWithDominance,
   resolveGridDemand,
+  resolveGridDemandRange,
 } from "./utils/gridDemand";
 import {
   encodeMap,
@@ -102,8 +103,17 @@ export default function App() {
     "oci-label-set-v1",
     "full",
   );
+  const [isNarrow, setIsNarrow] = useState(false);
   const hasAutoRun = useRef(false);
   const skipNextAutoScenarioRun = useRef(true);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 900px)");
+    const apply = () => setIsNarrow(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
 
   const shareableMap = useMemo(
     () => applyOverridesToMap(systemMap, assumptionOverrides),
@@ -158,18 +168,25 @@ export default function App() {
   }, [currentFrame, currentFrameIndex]);
 
   const gridDemand = useMemo(
-    () => resolveGridDemand(systemMap),
+    () => resolveGridDemand(shareableMap),
+    [shareableMap],
+  );
+
+  const gridDemandRange = useMemo(
+    () => resolveGridDemandRange(systemMap),
     [systemMap],
   );
 
-  const totalCapacity = useMemo(() => {
+  const capacityBreakdown = useMemo(() => {
     const fossil = currentFrame.fossil_capacity;
     const renewable = currentFrame.renewable_capacity;
     if (typeof fossil !== "number" || typeof renewable !== "number") {
       return null;
     }
-    return fossil + renewable;
+    return { fossil, renewable, total: fossil + renewable };
   }, [currentFrame]);
+
+  const totalCapacity = capacityBreakdown?.total ?? null;
 
   const blackoutRisk = useMemo(
     () =>
@@ -388,7 +405,7 @@ export default function App() {
       <main className="main-stage">
         <div className="stage-toolbar">
           <ModeIndicator mode={appMode} onChange={setAppMode} />
-          {appMode === "simulate" ? (
+          {appMode === "simulate" && !isNarrow ? (
             <LabelSetSelector value={labelSet} onChange={setLabelSet} />
           ) : null}
         </div>
@@ -422,9 +439,14 @@ export default function App() {
               currentFrameIndex={currentFrameIndex}
               loading={loading}
               compareMode={compareMode}
-              labelSet={labelSet}
+              labelSet={isNarrow ? "value" : labelSet}
               gridDemand={gridDemand}
+              gridDemandRange={gridDemandRange}
+              onGridDemandChange={(value) =>
+                onOverrideChange("grid_demand", value)
+              }
               totalCapacity={totalCapacity}
+              capacityBreakdown={capacityBreakdown}
               blackoutRisk={blackoutRisk}
             />
             <TimeSlider
@@ -445,11 +467,25 @@ export default function App() {
         assumptionOverrides={assumptionOverrides}
         onSent={(mode) => {
           setToastTone("success");
-          setToast(
-            mode === "clipboard"
-              ? `Copy this feedback and email us at rizim13@gmail.com.`
-              : "Feedback sent! Thank you.",
-          );
+          if (mode === "clipboard") {
+            setToast(
+              `Copy this feedback and email us at rizim13@gmail.com.`,
+            );
+          } else if (mode === "pending_activation") {
+            setToast(
+              "Almost there — check rizim13@gmail.com for a FormSubmit activation email (one-time), then try again.",
+            );
+          } else if (mode === "mailto") {
+            setToast(
+              "Opened your mail app — hit Send there to finish.",
+            );
+          } else {
+            setToast("Feedback emailed! Thank you.");
+          }
+        }}
+        onError={(message) => {
+          setToastTone("error");
+          setToast(message);
         }}
       />
     </div>

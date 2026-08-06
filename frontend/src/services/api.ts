@@ -45,4 +45,34 @@ export async function runScenarioBranch(
   return data;
 }
 
+export type FeedbackType = "Bug Report" | "Feature Request" | "General Praise";
+
+export interface FeedbackPayload {
+  type: FeedbackType;
+  message: string;
+  reply_email?: string;
+  map_name?: string;
+  assumptions?: Record<string, number>;
+  url?: string;
+  user_agent?: string;
+  screen?: string;
+}
+
+export interface FeedbackResponse {
+  status: string;
+  provider?: string;
+  to?: string;
+  note?: string;
+}
+
+/**
+ * Deliver feedback email via the backend (Resend or FormSubmit).
+ */
+export async function sendFeedback(
+  payload: FeedbackPayload,
+): Promise<FeedbackResponse> {
+  const { data } = await api.post<FeedbackResponse>("/feedback", payload);
+  return data;
+}
+
 export default api;

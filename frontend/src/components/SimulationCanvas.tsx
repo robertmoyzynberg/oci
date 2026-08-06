@@ -1,7 +1,20 @@
-import { useEffect, useMemo, useRef } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import * as d3 from "d3";
 import type { LabelSet } from "./LabelSetSelector";
-import type { Flow, Meme, Stock } from "../types/oci-types";
+import type { Flow, FlowInfluence, Meme, Stock } from "../types/oci-types";
+
+export interface CapacityBreakdown {
+  fossil: number;
+  renewable: number;
+  total: number;
+}
 
 export interface SimulationCanvasProps {
   stocks: Stock[];
@@ -17,10 +30,16 @@ export interface SimulationCanvasProps {
   compareMode?: boolean;
   /** How stock labels are annotated on the canvas. */
   labelSet?: LabelSet;
-  /** Static grid demand threshold (GW), when scenario supports it. */
+  /** Grid demand threshold (GW), when scenario supports it. */
   gridDemand?: number | null;
+  /** Drag bounds for grid demand (GW). */
+  gridDemandRange?: [number, number];
+  /** Called when the user drags the demand marker. */
+  onGridDemandChange?: (value: number) => void;
   /** Total generation capacity for demand gauge (GW). */
   totalCapacity?: number | null;
+  /** Fossil + renewable breakdown for hover math. */
+  capacityBreakdown?: CapacityBreakdown | null;
   /** 0–1 blackout risk when capacity < demand. */
   blackoutRisk?: number;
 }
@@ -71,10 +90,24 @@ function formatOuterValue(
   return unit ? `${num} ${unit}` : num;
 }
 
+function relatedFlowInfluences(meme: Meme): FlowInfluence[] {
+  return (meme.related_flows ?? []).map((entry) => {
+    if (typeof entry === "string") {
+      const charge = Math.abs(meme.emotional_charge);
+      const mag = Math.round(40 + charge * 110);
+      const signed =
+        meme.influence === "-" || meme.emotional_charge < 0 ? -mag : mag;
+      return { flowId: entry, modifier: signed };
+    }
+    return entry;
+  });
+}
+
 /** Flows touched by a meme via explicit related_flows, else stocks/assumptions. */
 function flowsInfluencedByMeme(meme: Meme, allFlows: Flow[]): Set<string> {
-  if (meme.related_flows?.length) {
-    return new Set(meme.related_flows);
+  const explicit = relatedFlowInfluences(meme);
+  if (explicit.length) {
+    return new Set(explicit.map((e) => e.flowId));
   }
   const relatedStocks = new Set(meme.related_stocks ?? []);
   const assumptions = meme.related_assumptions ?? [];
@@ -92,6 +125,25 @@ function flowsInfluencedByMeme(meme: Meme, allFlows: Flow[]): Set<string> {
   return ids;
 }
 
+/** Quantitative hover label: e.g. "-85% retirement rate". */
+function flowModifierLabel(meme: Meme, flow: Flow): string {
+  const entry = relatedFlowInfluences(meme).find((e) => e.flowId === flow.id);
+  if (entry) {
+    const sign = entry.modifier > 0 ? "+" : "";
+    const label =
+      entry.label ??
+      (flow.name.length > 20 ? `${flow.name.slice(0, 18)}…` : flow.name);
+    return `${sign}${entry.modifier}% ${label}`;
+  }
+  const charge = Math.abs(meme.emotional_charge);
+  const pct = Math.round(40 + charge * 110);
+  const sign =
+    meme.influence === "-" || meme.emotional_charge < 0 ? "-" : "+";
+  const name =
+    flow.name.length > 20 ? `${flow.name.slice(0, 18)}…` : flow.name;
+  return `${sign}${pct}% ${name}`;
+}
+
 /**
  * D3 force-directed system map. Builds SVG once, then updates geometry on frame changes.
  */
@@ -107,13 +159,21 @@ export default function SimulationCanvas({
   compareMode = false,
   labelSet = "full",
   gridDemand = null,
+  gridDemandRange = [70, 120],
+  onGridDemandChange,
   totalCapacity = null,
+  capacityBreakdown = null,
   blackoutRisk = 0,
 }: SimulationCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const simRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
   const builtKeyRef = useRef<string>("");
+  const gaugeTrackRef = useRef<HTMLDivElement | null>(null);
+  /** When set, frame updates must not overwrite meme→flow hover styles. */
+  const activeMemeHighlightRef = useRef<string | null>(null);
+  const [highlightCapacity, setHighlightCapacity] = useState(false);
+  const [draggingDemand, setDraggingDemand] = useState(false);
 
   const activeData = customData ?? simulationData;
 
@@ -152,6 +212,11 @@ export default function SimulationCanvas({
 
     const width = el.clientWidth || 800;
     const height = el.clientHeight || 600;
+    const isCompact = width < 640;
+    const padX = isCompact ? 36 : 48;
+    const padYTop = isCompact ? 72 : 48;
+    const padYBottom = isCompact ? 64 : 48;
+    const memeLabelLen = isCompact ? 10 : 16;
 
     if (builtKeyRef.current === topologyKey && svgRef.current) {
       return;
@@ -240,8 +305,17 @@ export default function SimulationCanvas({
         label: meme.name,
         meme,
         // Bias toward a visible quadrant near the related stock (not off-canvas).
-        x: Math.min(width * 0.85, (anchor?.x ?? width * 0.65) + 70),
-        y: Math.max(height * 0.18, (anchor?.y ?? height * 0.45) - 80),
+        x: Math.min(
+          width - padX,
+          Math.max(padX, (anchor?.x ?? width * 0.65) + (isCompact ? 40 : 70)),
+        ),
+        y: Math.max(
+          padYTop,
+          Math.min(
+            height - padYBottom,
+            (anchor?.y ?? height * 0.45) - (isCompact ? 40 : 80),
+          ),
+        ),
       });
     }
 
@@ -264,7 +338,7 @@ export default function SimulationCanvas({
           target: stockId,
         });
       }
-      for (const flowId of meme.related_flows ?? []) {
+      for (const { flowId } of relatedFlowInfluences(meme)) {
         const flow = flows.find((f) => f.id === flowId);
         if (!flow) continue;
         const endpoint = flow.to ?? flow.from;
@@ -296,6 +370,11 @@ export default function SimulationCanvas({
       .attr("class", "influence-marks")
       .attr("pointer-events", "none");
 
+    const glowPaths = gRoot
+      .insert("g", ".links")
+      .attr("class", "meme-glow-paths")
+      .attr("pointer-events", "none");
+
     const nodeSel = gRoot
       .append("g")
       .attr("class", "nodes")
@@ -306,21 +385,100 @@ export default function SimulationCanvas({
 
     let activeMeme: Meme | null = null;
 
-    const syncInfluenceMarks = () => {
-      if (!activeMeme?.influence) {
-        influenceMarks.selectAll("*").remove();
+    const linkMidpoint = (d: SimLink, offset = 14) => {
+      const s = d.source as SimNode;
+      const t = d.target as SimNode;
+      const mx = ((s.x ?? 0) + (t.x ?? 0)) / 2;
+      const my = ((s.y ?? 0) + (t.y ?? 0)) / 2;
+      const dx = (t.x ?? 0) - (s.x ?? 0);
+      const dy = (t.y ?? 0) - (s.y ?? 0);
+      const len = Math.hypot(dx, dy) || 1;
+      const ox = (-dy / len) * offset;
+      const oy = (dx / len) * offset;
+      return `translate(${mx + ox},${my + oy})`;
+    };
+
+    const flowMidCoords = (d: SimLink) => {
+      const s = d.source as SimNode;
+      const t = d.target as SimNode;
+      return {
+        x: ((s.x ?? 0) + (t.x ?? 0)) / 2,
+        y: ((s.y ?? 0) + (t.y ?? 0)) / 2,
+      };
+    };
+
+    /** Curved glow from meme center → affected flow midpoint. */
+    const syncGlowPaths = () => {
+      if (!activeMeme) {
+        glowPaths
+          .selectAll("path.meme-flow-glow")
+          .transition()
+          .duration(200)
+          .attr("opacity", 0)
+          .remove();
         return;
       }
       const meme = activeMeme;
+      const memeNode = nodes.find((n) => n.id === `meme:${meme.id}`);
+      if (!memeNode) return;
+      const flowIds = flowsInfluencedByMeme(meme, flows);
+      const flowLinks = links.filter(
+        (l) => l.flow && flowIds.has(l.flow.id),
+      );
+
+      const paths = glowPaths
+        .selectAll<SVGPathElement, SimLink>("path.meme-flow-glow")
+        .data(flowLinks, (d) => d.id)
+        .join(
+          (enter) =>
+            enter
+              .append("path")
+              .attr("class", "meme-flow-glow")
+              .attr("fill", "none")
+              .attr("stroke", "#F59E0B")
+              .attr("stroke-width", 2.75)
+              .attr("stroke-linecap", "round")
+              .attr("stroke-dasharray", "10 7")
+              .attr("opacity", 0)
+              .call((sel) =>
+                sel.transition().duration(220).attr("opacity", 0.95),
+              ),
+          (update) => update,
+          (exit) =>
+            exit.transition().duration(200).attr("opacity", 0).remove(),
+        );
+
+      paths.attr("d", (d) => {
+        const x1 = memeNode.x ?? 0;
+        const y1 = memeNode.y ?? 0;
+        const mid = flowMidCoords(d);
+        const x2 = mid.x;
+        const y2 = mid.y;
+        const cx = (x1 + x2) / 2 + (y2 - y1) * 0.28;
+        const cy = (y1 + y2) / 2 - (x2 - x1) * 0.28;
+        return `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`;
+      });
+    };
+
+    const syncInfluenceMarks = () => {
+      if (!activeMeme) {
+        influenceMarks.selectAll("*").remove();
+        syncGlowPaths();
+        return;
+      }
+      const meme = activeMeme;
+      const flowIds = flowsInfluencedByMeme(meme, flows);
+
       const memeLinks = links.filter(
         (l) =>
           !l.flow &&
           (String(l.id).startsWith(`meme-link:${meme.id}:`) ||
             String(l.id).startsWith(`meme-flow:${meme.id}:`)),
       );
-      const marks = influenceMarks
+
+      const signMarks = influenceMarks
         .selectAll<SVGGElement, SimLink>("g.influence-sign")
-        .data(memeLinks, (d) => d.id)
+        .data(meme.influence ? memeLinks : [], (d) => d.id)
         .join((enter) => {
           const g = enter.append("g").attr("class", "influence-sign");
           g.append("circle")
@@ -337,24 +495,69 @@ export default function SimulationCanvas({
             .text(meme.influence ?? "");
           return g;
         });
+      signMarks.attr("transform", (d) => linkMidpoint(d, 12));
 
-      marks.attr("transform", (d) => {
-        const s = d.source as SimNode;
-        const t = d.target as SimNode;
-        const mx = ((s.x ?? 0) + (t.x ?? 0)) / 2;
-        const my = ((s.y ?? 0) + (t.y ?? 0)) / 2;
-        // Slight perpendicular offset so the sign sits on the curve mid-span.
-        const dx = (t.x ?? 0) - (s.x ?? 0);
-        const dy = (t.y ?? 0) - (s.y ?? 0);
-        const len = Math.hypot(dx, dy) || 1;
-        const ox = (-dy / len) * 12;
-        const oy = (dx / len) * 12;
-        return `translate(${mx + ox},${my + oy})`;
+      // Percentage modifiers on the specific flow arrows this meme affects.
+      const flowLinks = links.filter(
+        (l) => l.flow && flowIds.has(l.flow.id),
+      );
+      const pctMarks = influenceMarks
+        .selectAll<SVGGElement, SimLink>("g.flow-modifier")
+        .data(flowLinks, (d) => d.id)
+        .join((enter) => {
+          const g = enter
+            .append("g")
+            .attr("class", "flow-modifier")
+            .style("opacity", 0);
+          g.append("rect")
+            .attr("rx", 6)
+            .attr("ry", 6)
+            .attr("fill", "#121820")
+            .attr("stroke", "#F59E0B")
+            .attr("stroke-width", 1.25);
+          g.append("text")
+            .attr("class", "flow-modifier-text")
+            .attr("text-anchor", "middle")
+            .attr("dy", "0.35em")
+            .attr("fill", "#F59E0B")
+            .attr("font-size", 10)
+            .attr("font-weight", 700);
+          g.transition().duration(200).style("opacity", 1);
+          return g;
+        },
+        (update) => update,
+        (exit) => {
+          exit.transition().duration(280).style("opacity", 0).remove();
+        },
+        );
+
+      pctMarks.each(function (d) {
+        if (!d.flow) return;
+        const label = flowModifierLabel(meme, d.flow);
+        const text = d3
+          .select(this)
+          .select("text.flow-modifier-text")
+          .attr("fill", "#E8EEF4")
+          .text(label);
+        const node = text.node() as SVGTextElement | null;
+        const width = Math.max(72, (node?.getComputedTextLength() ?? 80) + 16);
+        d3.select(this)
+          .select("rect")
+          .attr("x", -width / 2)
+          .attr("y", -11)
+          .attr("width", width)
+          .attr("height", 22)
+          .attr("fill", "rgba(18, 24, 32, 0.92)")
+          .attr("fill-opacity", 0.95);
       });
+      pctMarks.attr("transform", (d) => linkMidpoint(d, -18));
+      syncGlowPaths();
     };
 
     const clearMemeHighlight = () => {
       activeMeme = null;
+      activeMemeHighlightRef.current = null;
+      syncGlowPaths();
       nodeSel
         .classed("is-dimmed", false)
         .classed("is-highlighted", false)
@@ -364,9 +567,11 @@ export default function SimulationCanvas({
       linkSel
         .classed("is-dimmed", false)
         .classed("is-highlighted", false)
+        .classed("flow-influence", false)
         .classed("dash-animate", false)
         .style("opacity", null)
         .attr("stroke", (d) => (d.flow ? "#2563EB" : "rgba(245, 158, 11, 0.45)"))
+        .attr("stroke-width", (d) => (d.flow ? null : 1.4))
         .attr("stroke-dasharray", (d) => (d.flow ? null : "5 4"))
         .attr("marker-end", (d) => (d.flow ? "url(#flow-arrow)" : null));
       influenceMarks.selectAll("*").remove();
@@ -374,6 +579,7 @@ export default function SimulationCanvas({
 
     const highlightMeme = (meme: Meme) => {
       activeMeme = meme;
+      activeMemeHighlightRef.current = meme.id;
       const stockIds = new Set(meme.related_stocks ?? []);
       const flowIds = flowsInfluencedByMeme(meme, flows);
       const memeNodeId = `meme:${meme.id}`;
@@ -382,6 +588,9 @@ export default function SimulationCanvas({
         !d.flow &&
         (String(d.id).startsWith(`meme-link:${meme.id}:`) ||
           String(d.id).startsWith(`meme-flow:${meme.id}:`));
+
+      const isRelatedFlow = (d: SimLink) =>
+        Boolean(d.flow && flowIds.has(d.flow.id));
 
       nodeSel
         .classed("is-highlighted", (d) => {
@@ -410,34 +619,36 @@ export default function SimulationCanvas({
         .attr("filter", "url(#glow)");
 
       linkSel
-        .classed("is-highlighted", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return true;
-          return isRelatedMemeLink(d);
-        })
+        .classed("is-highlighted", (d) => isRelatedFlow(d) || isRelatedMemeLink(d))
+        .classed("flow-influence", (d) => isRelatedFlow(d))
         .classed("is-dimmed", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return false;
-          if (isRelatedMemeLink(d)) return false;
+          if (isRelatedFlow(d) || isRelatedMemeLink(d)) return false;
           return true;
         })
-        .classed("dash-animate", (d) => isRelatedMemeLink(d) || Boolean(d.flow && flowIds.has(d.flow.id)))
+        .classed(
+          "dash-animate",
+          (d) => isRelatedMemeLink(d) || isRelatedFlow(d),
+        )
         .style("opacity", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return "1";
-          if (isRelatedMemeLink(d)) return "1";
+          if (isRelatedFlow(d) || isRelatedMemeLink(d)) return "1";
           return "0.2";
         })
         .attr("stroke", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return "#F59E0B";
-          if (isRelatedMemeLink(d)) return "#F59E0B";
+          if (isRelatedFlow(d) || isRelatedMemeLink(d)) return "#F59E0B";
           return d.flow ? "#2563EB" : "rgba(245, 158, 11, 0.45)";
         })
+        .attr("stroke-width", (d) => {
+          if (isRelatedFlow(d)) return 6;
+          if (isRelatedMemeLink(d)) return 2.5;
+          return d.flow ? 1.5 : 1.4;
+        })
         .attr("stroke-dasharray", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return "6 4";
+          if (isRelatedFlow(d)) return "7 4";
           if (!d.flow) return "5 4";
           return null;
         })
         .attr("marker-end", (d) => {
-          if (d.flow && flowIds.has(d.flow.id)) return "url(#meme-arrow)";
-          if (isRelatedMemeLink(d)) return "url(#meme-arrow)";
+          if (isRelatedFlow(d) || isRelatedMemeLink(d)) return "url(#meme-arrow)";
           return d.flow ? "url(#flow-arrow)" : null;
         });
 
@@ -473,10 +684,10 @@ export default function SimulationCanvas({
           `Meme: ${d.label}${d.meme?.influence ? `, influence ${d.meme.influence}` : ""}. Focus or hover to highlight related stocks and flows.`,
       )
       .style("cursor", "pointer")
-      .on("mouseover", (_event, d) => {
+      .on("mouseenter", (_event, d) => {
         if (d.meme) highlightMeme(d.meme);
       })
-      .on("mouseout", clearMemeHighlight)
+      .on("mouseleave", clearMemeHighlight)
       .on("focus", (_event, d) => {
         if (d.meme) highlightMeme(d.meme);
       })
@@ -567,7 +778,7 @@ export default function SimulationCanvas({
       .attr("font-size", 10)
       .attr("font-weight", 600)
       .attr("pointer-events", "none")
-      .text((d) => truncateLabel(d.label, 16));
+      .text((d) => truncateLabel(d.label, memeLabelLen));
 
     nodeSel.append("title").text((d) => d.label);
 
@@ -578,13 +789,17 @@ export default function SimulationCanvas({
         d3
           .forceLink<SimNode, SimLink>(links)
           .id((d) => d.id)
-          .distance((d) => (d.flow ? 160 : 100))
+          .distance((d) => (d.flow ? (isCompact ? 110 : 160) : isCompact ? 72 : 100))
           .strength(0.45),
       )
-      .force("charge", d3.forceManyBody().strength(-480))
-      .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collide", d3.forceCollide<SimNode>().radius(52))
+      .force("charge", d3.forceManyBody().strength(isCompact ? -280 : -480))
+      .force("center", d3.forceCenter(width / 2, height / 2 + (isCompact ? 8 : 0)))
+      .force("collide", d3.forceCollide<SimNode>().radius(isCompact ? 40 : 52))
       .on("tick", () => {
+        for (const n of nodes) {
+          n.x = Math.max(padX, Math.min(width - padX, n.x ?? width / 2));
+          n.y = Math.max(padYTop, Math.min(height - padYBottom, n.y ?? height / 2));
+        }
         linkSel
           .attr("x1", (d) => (d.source as SimNode).x ?? 0)
           .attr("y1", (d) => (d.source as SimNode).y ?? 0)
@@ -683,6 +898,8 @@ export default function SimulationCanvas({
     });
 
     const memeById = new Map(memes.map((m) => [m.id, m]));
+    const compactLabels = (containerRef.current?.clientWidth ?? 800) < 640;
+    const memeMaxChars = compactLabels ? 10 : 16;
     root.selectAll<SVGGElement, SimNode>("g.node-meme").each(function (d) {
       const meme = (d.meme ? memeById.get(d.meme.id) : undefined) ?? d.meme;
       if (!meme) return;
@@ -691,10 +908,19 @@ export default function SimulationCanvas({
       const replication = memeReplicationRate(meme);
       // Dominance scaling: size + opacity + glow track emotional charge.
       const radius = 10 + 20 * charge;
-      const glowPx = 4 + charge * 18;
+      const intensity =
+        charge >= 0.75 ? "high" : charge >= 0.45 ? "mid" : "low";
+      // Faster pulse = stronger narrative (1.8s → 0.9s).
+      const pulseDuration = `${(2.1 - charge * 1.1).toFixed(2)}s`;
       const node = d3.select(this);
-      // Don't fight hover highlight filter while a meme is focused.
-      const highlighted = node.classed("meme-highlight") || node.classed("is-highlighted");
+      const highlighted =
+        node.classed("meme-highlight") || node.classed("is-highlighted");
+      node
+        .classed("meme-dominant", true)
+        .classed("meme-dominant-low", intensity === "low")
+        .classed("meme-dominant-mid", intensity === "mid")
+        .classed("meme-dominant-high", intensity === "high")
+        .style("--meme-pulse-duration", pulseDuration);
       node
         .select("circle.body")
         .attr("r", radius)
@@ -703,22 +929,19 @@ export default function SimulationCanvas({
         .attr("stroke", "#F59E0B")
         .attr("stroke-width", 1.5 + charge * 2)
         .attr("stroke-opacity", 1);
-      if (!highlighted) {
-        node
-          .select("circle.body")
-          .style(
-            "filter",
-            `drop-shadow(0 0 ${glowPx}px rgba(245, 158, 11, ${0.35 + charge * 0.55}))`,
-          );
+      if (highlighted) {
+        node.select("circle.body").style("filter", null);
       }
       node
         .select("text.meme-name")
         .attr("y", radius + 12)
         .attr("fill-opacity", 0.65 + replication * 0.35)
-        .text(truncateLabel(d.label, 16));
+        .text(truncateLabel(d.label, memeMaxChars));
     });
 
     root.selectAll<SVGLineElement, SimLink>("g.links line").each(function (d) {
+      // Preserve meme→flow hover styling while a meme is focused.
+      if (activeMemeHighlightRef.current) return;
       if (!d.flow) {
         d3.select(this).attr("stroke-width", 1.4);
         return;
@@ -738,11 +961,76 @@ export default function SimulationCanvas({
     });
   }, [frame, nextFrame, stocks, baselineFrame, compareMode, labelSet, memes]);
 
+  // Soft glow on Fossil + Renewable when hovering Total Capacity.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const CAPACITY_IDS = new Set(["fossil_capacity", "renewable_capacity"]);
+    d3.select(svg)
+      .selectAll<SVGGElement, SimNode>("g.node-stock")
+      .classed(
+        "capacity-glow",
+        (d) => highlightCapacity && CAPACITY_IDS.has(d.id),
+      );
+  }, [highlightCapacity, stocks, frame]);
+
+  const demandFromPointer = useCallback(
+    (clientX: number) => {
+      const track = gaugeTrackRef.current;
+      if (!track || gridDemand == null) return null;
+      const rect = track.getBoundingClientRect();
+      if (rect.width <= 0) return null;
+      const [min, max] = gridDemandRange;
+      const gaugeMax = Math.max(max, gridDemand, totalCapacity ?? 0, 1);
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const raw = pct * gaugeMax;
+      const snapped = Math.round(raw); // 1 GW snap
+      return Math.max(min, Math.min(max, snapped));
+    },
+    [gridDemand, gridDemandRange, totalCapacity],
+  );
+
+  const onDemandPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!onGridDemandChange || gridDemand == null) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDraggingDemand(true);
+    const next = demandFromPointer(event.clientX);
+    if (next != null) onGridDemandChange(next);
+  };
+
+  const onDemandPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!draggingDemand || !onGridDemandChange) return;
+    const next = demandFromPointer(event.clientX);
+    if (next != null) onGridDemandChange(next);
+  };
+
+  const onDemandPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!draggingDemand) return;
+    setDraggingDemand(false);
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // ignore
+    }
+  };
+
   const hasData = Boolean(activeData && activeData.length > 0);
   const inBlackout = blackoutRisk > 0;
+  /** Any stock in the Low / stress band → subtle canvas red tint. */
+  const inStress = useMemo(() => {
+    return stocks.some((stock) => {
+      const value = Number(frame[stock.id] ?? stock.initial_value);
+      const min = stock.min_value ?? 0;
+      const max = stock.max_value ?? Math.max(value, 1);
+      const t = (value - min) / (max - min || 1);
+      return t < 0.33;
+    });
+  }, [stocks, frame]);
   const showDemandGauge = gridDemand != null && totalCapacity != null;
+  const [demandMin, demandMax] = gridDemandRange;
   const gaugeMax = showDemandGauge
-    ? Math.max(gridDemand * 1.25, totalCapacity * 1.05, 1)
+    ? Math.max(demandMax, gridDemand, totalCapacity * 1.05, 1)
     : 1;
   const capacityPct = showDemandGauge
     ? Math.min(100, (totalCapacity / gaugeMax) * 100)
@@ -750,6 +1038,11 @@ export default function SimulationCanvas({
   const demandPct = showDemandGauge
     ? Math.min(100, (gridDemand / gaugeMax) * 100)
     : 0;
+
+  const capacityTooltip =
+    capacityBreakdown != null
+      ? `Total Capacity: Fossil (${capacityBreakdown.fossil.toFixed(1)} GW) + Renewable (${capacityBreakdown.renewable.toFixed(1)} GW) = ${capacityBreakdown.total.toFixed(1)} GW`
+      : null;
 
   const labelHint =
     labelSet === "full"
@@ -759,7 +1052,9 @@ export default function SimulationCanvas({
         : "Value inside circle";
 
   return (
-    <div className={`canvas-wrap${inBlackout ? " blackout-active" : ""}`}>
+    <div
+      className={`canvas-wrap${inBlackout ? " blackout-active" : ""}${inStress ? " stress-active" : ""}`}
+    >
       <div className="simulation-canvas" ref={containerRef} />
 
       {inBlackout ? (
@@ -773,28 +1068,66 @@ export default function SimulationCanvas({
 
       {showDemandGauge ? (
         <div
-          className="demand-gauge"
-          aria-label={`Total capacity ${totalCapacity.toFixed(1)} GW versus grid demand ${gridDemand.toFixed(0)} GW`}
+          className={`demand-gauge${draggingDemand ? " dragging" : ""}`}
+          aria-label={`Total capacity ${totalCapacity.toFixed(1)} GW versus grid demand ${gridDemand.toFixed(0)} GW. Drag the demand marker to adjust.`}
         >
-          <div className="demand-gauge-head">
+          <div
+            className={`demand-gauge-head${highlightCapacity ? " lit" : ""}`}
+            onMouseEnter={() => setHighlightCapacity(true)}
+            onMouseLeave={() => setHighlightCapacity(false)}
+            onFocus={() => setHighlightCapacity(true)}
+            onBlur={() => setHighlightCapacity(false)}
+            tabIndex={0}
+            role="button"
+            aria-label={capacityTooltip ?? "Total capacity breakdown"}
+            title={capacityTooltip ?? undefined}
+          >
             <span>Total capacity</span>
             <strong>
               {totalCapacity.toFixed(1)} / {gridDemand.toFixed(0)} GW
             </strong>
+            {highlightCapacity && capacityTooltip ? (
+              <div className="capacity-tooltip" role="tooltip">
+                {capacityTooltip}
+              </div>
+            ) : null}
           </div>
-          <div className="demand-gauge-track">
+          <div
+            className="demand-gauge-track"
+            ref={gaugeTrackRef}
+            onPointerDown={onDemandPointerDown}
+            onPointerMove={onDemandPointerMove}
+            onPointerUp={onDemandPointerUp}
+            onPointerCancel={onDemandPointerUp}
+          >
             <div
-              className={`demand-gauge-fill${inBlackout ? " deficit" : ""}`}
+              className={`demand-gauge-fill${inBlackout ? " deficit" : ""}${highlightCapacity ? " lit" : ""}`}
               style={{ width: `${capacityPct}%` }}
+              onMouseEnter={() => setHighlightCapacity(true)}
+              onMouseLeave={() => setHighlightCapacity(false)}
             />
             <div
               className="demand-gauge-line"
               style={{ left: `${demandPct}%` }}
-              title={`Grid Demand (${gridDemand.toFixed(0)} GW)`}
-            />
+              title={`Grid Demand: ${gridDemand.toFixed(0)} GW (drag to adjust)`}
+              role="slider"
+              aria-valuemin={demandMin}
+              aria-valuemax={demandMax}
+              aria-valuenow={gridDemand}
+              aria-label="Grid demand"
+            >
+              <span className="demand-gauge-handle" aria-hidden="true" />
+              <span className="demand-gauge-value">
+                Grid Demand: {gridDemand.toFixed(0)} GW
+              </span>
+            </div>
+          </div>
+          <div className="demand-gauge-readout" aria-hidden="true">
+            Demand {gridDemand.toFixed(0)} GW · drag marker
           </div>
           <div className="demand-gauge-label">
-            Grid Demand ({gridDemand.toFixed(0)} GW) — dashed marker
+            Drag the dashed marker to simulate demand shocks ({demandMin}–
+            {demandMax} GW)
           </div>
         </div>
       ) : null}
@@ -849,8 +1182,22 @@ export default function SimulationCanvas({
           Flow (arrow)
         </div>
         <div>
-          <span className="swatch meme" aria-hidden="true" /> Meme (grows with
+          <span className="swatch meme" aria-hidden="true" /> Meme (pulses with
           dominance)
+        </div>
+        <div>
+          <span className="swatch flow-influence" aria-hidden="true" /> Flow
+          arrow (meme influence)
+        </div>
+        <div>
+          <span className="swatch glow-path" aria-hidden="true" /> Glow path
+          (meme → flow)
+        </div>
+        <div>
+          <span className="swatch modifier-label" aria-hidden="true">
+            %
+          </span>{" "}
+          Flow modifier label
         </div>
         <div>
           <span className="swatch influence-plus" aria-hidden="true">

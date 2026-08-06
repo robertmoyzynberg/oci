@@ -22,7 +22,10 @@ export default function ModeIndicator({ mode, onChange }: ModeIndicatorProps) {
         aria-pressed={mode === "simulate"}
         onClick={() => onChange("simulate")}
       >
-        🔬 Simulation Mode
+        <span className="mode-pill-full">🔬 Simulation Mode</span>
+        <span className="mode-pill-short" aria-hidden="true">
+          🔬 Sim
+        </span>
       </button>
       <button
         type="button"
@@ -31,7 +34,10 @@ export default function ModeIndicator({ mode, onChange }: ModeIndicatorProps) {
         onClick={() => onChange("build")}
         title="Construct your own system map — coming soon"
       >
-        🛠️ Build Mode
+        <span className="mode-pill-full">🛠️ Build Mode</span>
+        <span className="mode-pill-short" aria-hidden="true">
+          🛠️ Build
+        </span>
       </button>
     </div>
   );

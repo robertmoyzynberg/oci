@@ -1,16 +1,22 @@
 import type { Meme, SystemMap } from "../types/oci-types";
 
-/** Resolve grid demand (GW) from map extras or assumption registry. */
+/** Resolve grid demand (GW): assumption registry first (supports overrides), then extras. */
 export function resolveGridDemand(map: SystemMap): number | null {
-  const fromExtras = map.visual_style?.extras?.grid_demand;
-  if (typeof fromExtras === "number" && Number.isFinite(fromExtras)) {
-    return fromExtras;
-  }
   const fromAssumption = map.assumptions.registry.grid_demand?.value;
   if (typeof fromAssumption === "number" && Number.isFinite(fromAssumption)) {
     return fromAssumption;
   }
+  const fromExtras = map.visual_style?.extras?.grid_demand;
+  if (typeof fromExtras === "number" && Number.isFinite(fromExtras)) {
+    return fromExtras;
+  }
   return null;
+}
+
+export function resolveGridDemandRange(map: SystemMap): [number, number] {
+  const range = map.assumptions.registry.grid_demand?.range;
+  if (range && range.length === 2) return [range[0], range[1]];
+  return [70, 120];
 }
 
 export function computeBlackoutRisk(

@@ -75,13 +75,23 @@ export interface FeedbackLoop {
   polarity?: string | null;
 }
 
+/** Quantitative influence of a meme on a specific flow (hover label). */
+export interface FlowInfluence {
+  flowId: string;
+  /** Percent modifier, e.g. -85 or +120. */
+  modifier: number;
+  /** Short human label, e.g. "retirement rate". */
+  label?: string;
+}
+
 export interface Meme {
   id: string;
   name: string;
   description?: string;
   emotional_charge: number;
   related_stocks?: string[];
-  related_flows?: string[];
+  /** Flow IDs or rich influence descriptors. */
+  related_flows?: Array<string | FlowInfluence>;
   related_assumptions?: string[];
   /** Direction of narrative influence on related elements. */
   influence?: "+" | "-" | "~";
@@ -125,6 +135,11 @@ export interface SystemMap {
   memes?: Meme[];
   assumptions: Assumptions;
   visual_style?: VisualStyle;
+  /**
+   * Optional scenario threshold (GW). Prefer `assumptions.registry.grid_demand`
+   * for interactive overrides; this mirrors the planning baseline when present.
+   */
+  grid_demand?: number;
 }
 
 export interface BranchSpec {

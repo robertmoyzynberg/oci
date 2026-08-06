@@ -23,7 +23,7 @@ function stockHealthStatus(value: number, stock: Stock): HealthStatus {
 }
 
 /**
- * Compact readout of current stock levels with color-matched health status.
+ * Compact readout: name → value → health status stacked for fast scanning.
  */
 export default function SystemStatus({ stocks, stockValues }: SystemStatusProps) {
   return (
@@ -35,14 +35,12 @@ export default function SystemStatus({ stocks, stockValues }: SystemStatusProps)
           const status = stockHealthStatus(value, stock);
           const color = STATUS_COLOR[status];
           return (
-            <li key={stock.id}>
-              <div className="status-row-main">
-                <span>{stock.name}</span>
-                <span className="value">
-                  {value.toFixed(2)}
-                  {stock.unit ? ` ${stock.unit}` : ""}
-                </span>
-              </div>
+            <li key={stock.id} className="status-card">
+              <span className="status-name">{stock.name}</span>
+              <span className="value">
+                {value.toFixed(1)}
+                {stock.unit ? ` ${stock.unit}` : ""}
+              </span>
               <span className="status-health" title={status}>
                 <span
                   className="status-dot"

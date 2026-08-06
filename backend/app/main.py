@@ -12,16 +12,26 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal, Optional
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.engine import SafeEvalError, SimulationEngine
 from app.models import SystemMap
+
+FEEDBACK_TO = os.getenv("FEEDBACK_TO", "rizim13@gmail.com").strip()
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+# Resend test sender works without a verified domain; replace after DNS setup.
+FEEDBACK_FROM = os.getenv(
+    "FEEDBACK_FROM",
+    "OCI Converge <onboarding@resend.dev>",
+).strip()
+
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "oci-schema-v1.json"
 
@@ -82,6 +92,97 @@ class ScenarioBranchRequest(BaseModel):
     )
 
 
+class FeedbackRequest(BaseModel):
+    """User feedback payload from the frontend FAB."""
+
+    type: Literal["Bug Report", "Feature Request", "General Praise"] = Field(
+        ...,
+        description="Feedback category.",
+    )
+    message: str = Field(..., min_length=1, max_length=5000)
+    reply_email: str = Field(default="", max_length=320)
+    map_name: str = Field(default="", max_length=200)
+    assumptions: Dict[str, Any] = Field(default_factory=dict)
+    url: str = Field(default="", max_length=4000)
+    user_agent: str = Field(default="", max_length=1000)
+    screen: str = Field(default="", max_length=64)
+
+    @field_validator("message")
+    @classmethod
+    def strip_message(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Message cannot be empty.")
+        return cleaned
+
+
+def _format_feedback_text(body: FeedbackRequest) -> str:
+    return "\n".join(
+        [
+            f"Feedback Type: {body.type}",
+            f"Message: {body.message}",
+            f"Email: {body.reply_email.strip() or '(not provided)'}",
+            f"User Agent: {body.user_agent or 'unknown'}",
+            f"Screen: {body.screen or 'unknown'}",
+            f"Map Name: {body.map_name or 'n/a'}",
+            f"Assumptions: {body.assumptions}",
+            f"URL: {body.url}",
+        ]
+    )
+
+
+def _send_via_resend(subject: str, text: str, reply_to: Optional[str]) -> None:
+    payload: Dict[str, Any] = {
+        "from": FEEDBACK_FROM,
+        "to": [FEEDBACK_TO],
+        "subject": subject,
+        "text": text,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    with httpx.Client(timeout=20.0) as client:
+        response = client.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Resend error ({response.status_code}): {response.text}",
+        )
+
+
+def _send_via_formsubmit(subject: str, text: str, reply_email: str) -> Dict[str, Any]:
+    """Deliver via FormSubmit (no API key). First use requires inbox confirmation."""
+    with httpx.Client(timeout=20.0) as client:
+        response = client.post(
+            f"https://formsubmit.co/ajax/{FEEDBACK_TO}",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            json={
+                "name": "OCI Converge Feedback",
+                "email": reply_email.strip() or "noreply@oci-converge.local",
+                "_subject": subject,
+                "message": text,
+            },
+        )
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"FormSubmit error ({response.status_code}): {response.text}",
+        )
+    try:
+        return response.json()
+    except ValueError:
+        return {"ok": True, "raw": response.text}
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     """Liveness probe.
@@ -91,6 +192,37 @@ def health() -> Dict[str, str]:
     """
     return {"status": "healthy", "version": "1.0.0"}
 
+
+@app.post("/feedback")
+def submit_feedback(body: FeedbackRequest) -> JSONResponse:
+    """Email user feedback to ``FEEDBACK_TO``.
+
+    Prefers Resend when ``RESEND_API_KEY`` is set; otherwise FormSubmit
+    (first delivery requires confirming an activation email in that inbox).
+    """
+    subject = f"[OCI Feedback] {body.type}"
+    text = _format_feedback_text(body)
+    reply = body.reply_email.strip() or None
+
+    if RESEND_API_KEY:
+        _send_via_resend(subject, text, reply)
+        return JSONResponse(
+            content={"status": "sent", "provider": "resend", "to": FEEDBACK_TO}
+        )
+
+    result = _send_via_formsubmit(subject, text, body.reply_email)
+    return JSONResponse(
+        content={
+            "status": "sent",
+            "provider": "formsubmit",
+            "to": FEEDBACK_TO,
+            "detail": result,
+            "note": (
+                "If this is the first FormSubmit delivery, check "
+                f"{FEEDBACK_TO} for an activation email and confirm it."
+            ),
+        }
+    )
 
 @app.get("/schema")
 def get_schema() -> FileResponse:

@@ -125,7 +125,13 @@ export const defaultMap: SystemMap = {
         "A hopeful civic narrative that frames renewable adoption as regional identity and moral progress.",
       emotional_charge: 0.9,
       related_stocks: ["renewable_capacity"],
-      related_flows: ["build_renewables"],
+      related_flows: [
+        {
+          flowId: "build_renewables",
+          modifier: 120,
+          label: "permitting / build speed",
+        },
+      ],
       related_assumptions: ["tech_improvement", "build_base"],
       influence: "+",
     },
@@ -136,7 +142,13 @@ export const defaultMap: SystemMap = {
         "A fearful narrative that equates fossil retirement with unreliable power and winter blackouts. Grows when total capacity falls below grid demand.",
       emotional_charge: -0.55,
       related_stocks: ["fossil_capacity", "renewable_capacity"],
-      related_flows: ["retire_fossil", "build_renewables"],
+      related_flows: [
+        {
+          flowId: "retire_fossil",
+          modifier: -85,
+          label: "retirement rate",
+        },
+      ],
       related_assumptions: ["retire_rate"],
       influence: "-",
     },
@@ -176,7 +188,7 @@ export const defaultMap: SystemMap = {
         confidence: 0.9,
         range: [70, 120],
         source: "Peak regional load + planning reserve (GW)",
-        mutable: false,
+        mutable: true,
       },
     },
     scenario_branches: [

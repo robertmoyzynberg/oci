@@ -20,7 +20,10 @@ export default function TimeSlider({
   return (
     <div className="time-slider">
       <div className="time-slider-label">
-        <span>Time scrubber</span>
+        <span className="time-slider-title-full">Time scrubber</span>
+        <span className="time-slider-title-short" aria-hidden="true">
+          Time
+        </span>
         <strong>Year {year}</strong>
       </div>
       <input
