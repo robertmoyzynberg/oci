@@ -15,14 +15,25 @@ Open Civilization Intelligence (OCI) Converge is an open-source sociotechnical s
 
 > First request after idle may take 30–60s while the free-tier Render backend wakes up.
 
+### Launch checklist (verified)
+
+| Check | Status |
+| :--- | :--- |
+| Live URL loads + auto-simulates Energy scenario | Pass |
+| Feedback ✉️ modal opens and submits | Pass (see Feedback) |
+| Shareable `#` hash encodes map; Copy Link / Share Challenge available | Pass |
+| README matches live deploy | Pass |
+
 ## How to use
 
 1. Open the live app (or click **🚀 Load Example Scenario**).
 2. Read the onboarding tip: **circles = stocks**, **arrows = flows**, **gold dots = memes**.
 3. Drag assumption sliders (e.g. Fossil Retirement Rate), then **Run Simulation**.
 4. Scrub the time slider — watch capacity vs **Grid Demand**; if capacity falls below demand, the system enters a **blackout** state and Blackout Anxiety grows.
-5. Hover a gold meme to see what it influences (`+` / `−`).
+5. Hover (or tap) a gold meme to see what it influences (`+` / `−` and % modifiers on flows).
 6. Click **📤 Share Challenge** to copy a classroom-ready assignment with your current link.
+
+On phones, the canvas is prioritized; legends and long labels are compacted automatically.
 
 ## Shareable URLs
 
@@ -51,26 +62,36 @@ Invalid or missing hashes fall back to the Renewable Energy Transition demo.
 ```bash
 # Backend
 cd backend
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-PYTHONPATH=. uvicorn app.main:app --reload --port 8000
+PYTHONPATH=. uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 # Frontend (Vite proxies /api → localhost:8000)
 cd frontend
 npm install
-npm run dev
+npm run dev -- --port 5174 --host
 ```
 
-Set `VITE_API_URL` in production to the Render backend URL (`frontend/vercel.json` / Vercel env).
+Open **http://127.0.0.1:5174/** (prefer `127.0.0.1` over `localhost` if the page looks blank).
+
+Set `VITE_API_URL` in production to the Render backend URL (Vercel project env / `frontend/.env.example`).
 
 ## Deploy
 
-- Backend: Render Blueprint (`render.yaml` / `backend/render.yaml`)
+- Backend: push to `main` (Render Blueprint — `render.yaml` / `backend/render.yaml`, `rootDir: backend`)
 - Frontend: `cd frontend && vercel --prod --yes`
 
 ## Feedback
 
 Use the **✉️** button in the live app (preferred), or email **rizim13@gmail.com**.
+
+Delivery path:
+
+1. Backend `POST /feedback` via **Resend** when `RESEND_API_KEY` is set on Render.
+2. Otherwise the browser posts to **FormSubmit** — first use sends an **activation email** to `rizim13@gmail.com` (check spam); confirm once, then messages arrive.
+3. If both fail, the app falls back to mailto / clipboard.
+
+Optional Render env vars: `FEEDBACK_TO`, `RESEND_API_KEY`, `FEEDBACK_FROM` (see `backend/.env.example`).
 
 ## Contributing
 
