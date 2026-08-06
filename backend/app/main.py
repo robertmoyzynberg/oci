@@ -156,33 +156,6 @@ def _send_via_resend(subject: str, text: str, reply_to: Optional[str]) -> None:
         )
 
 
-def _send_via_formsubmit(subject: str, text: str, reply_email: str) -> Dict[str, Any]:
-    """Deliver via FormSubmit (no API key). First use requires inbox confirmation."""
-    with httpx.Client(timeout=20.0) as client:
-        response = client.post(
-            f"https://formsubmit.co/ajax/{FEEDBACK_TO}",
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            json={
-                "name": "OCI Converge Feedback",
-                "email": reply_email.strip() or "noreply@oci-converge.local",
-                "_subject": subject,
-                "message": text,
-            },
-        )
-    if response.status_code >= 400:
-        raise HTTPException(
-            status_code=502,
-            detail=f"FormSubmit error ({response.status_code}): {response.text}",
-        )
-    try:
-        return response.json()
-    except ValueError:
-        return {"ok": True, "raw": response.text}
-
-
 @app.get("/health")
 def health() -> Dict[str, str]:
     """Liveness probe.
@@ -195,33 +168,27 @@ def health() -> Dict[str, str]:
 
 @app.post("/feedback")
 def submit_feedback(body: FeedbackRequest) -> JSONResponse:
-    """Email user feedback to ``FEEDBACK_TO``.
+    """Email user feedback to ``FEEDBACK_TO`` via Resend.
 
-    Prefers Resend when ``RESEND_API_KEY`` is set; otherwise FormSubmit
-    (first delivery requires confirming an activation email in that inbox).
+    Requires ``RESEND_API_KEY``. Without it, returns 503 so the frontend can
+    fall back to browser-side FormSubmit (server-side FormSubmit is blocked
+    by Cloudflare from Render).
     """
+    if not RESEND_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "RESEND_API_KEY is not configured. "
+                "Set it on the backend, or use the frontend FormSubmit fallback."
+            ),
+        )
+
     subject = f"[OCI Feedback] {body.type}"
     text = _format_feedback_text(body)
     reply = body.reply_email.strip() or None
-
-    if RESEND_API_KEY:
-        _send_via_resend(subject, text, reply)
-        return JSONResponse(
-            content={"status": "sent", "provider": "resend", "to": FEEDBACK_TO}
-        )
-
-    result = _send_via_formsubmit(subject, text, body.reply_email)
+    _send_via_resend(subject, text, reply)
     return JSONResponse(
-        content={
-            "status": "sent",
-            "provider": "formsubmit",
-            "to": FEEDBACK_TO,
-            "detail": result,
-            "note": (
-                "If this is the first FormSubmit delivery, check "
-                f"{FEEDBACK_TO} for an activation email and confirm it."
-            ),
-        }
+        content={"status": "sent", "provider": "resend", "to": FEEDBACK_TO}
     )
 
 @app.get("/schema")

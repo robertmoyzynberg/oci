@@ -157,6 +157,8 @@ export default function FeedbackButton({
     setSending(true);
     try {
       let result: Awaited<ReturnType<typeof sendFeedback>> | null = null;
+
+      // 1) Prefer Resend via backend when configured.
       try {
         result = await sendFeedback({
           type,
@@ -173,7 +175,7 @@ export default function FeedbackButton({
               : "unknown",
         });
       } catch {
-        // Older backends without /feedback — deliver via FormSubmit directly.
+        // 2) Browser-side FormSubmit (server-side FormSubmit is blocked on Render).
         const formRes = await fetch(
           `https://formsubmit.co/ajax/${FEEDBACK_TO}`,
           {
@@ -184,14 +186,30 @@ export default function FeedbackButton({
             },
             body: JSON.stringify({
               name: "OCI Converge Feedback",
-              email: replyEmail.trim() || "noreply@oci-converge.local",
+              email: replyEmail.trim() || "feedback@oci-converge.app",
               _subject: subject,
               message: body,
+              _template: "box",
+              _captcha: "false",
             }),
           },
         );
-        if (!formRes.ok) {
-          throw new Error(`FormSubmit ${formRes.status}`);
+        const formJson = (await formRes.json().catch(() => null)) as {
+          success?: string | boolean;
+          message?: string;
+        } | null;
+        const ok =
+          formRes.ok &&
+          formJson != null &&
+          (formJson.success === true ||
+            formJson.success === "true" ||
+            /thank|sent|success|activated|confirm/i.test(
+              formJson.message ?? "",
+            ));
+        if (!ok) {
+          throw new Error(
+            formJson?.message || `FormSubmit ${formRes.status}`,
+          );
         }
         result = { status: "sent", provider: "formsubmit" };
       }
@@ -202,7 +220,7 @@ export default function FeedbackButton({
       if (result.provider === "formsubmit") {
         onSent?.(
           "pending_activation",
-          "Submitted via FormSubmit. First time: confirm the activation email in rizim13@gmail.com (check spam), then send again.",
+          "Submitted. First time: confirm the FormSubmit email in rizim13@gmail.com (check spam), then send again.",
         );
       } else {
         onSent?.("api");
